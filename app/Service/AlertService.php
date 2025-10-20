@@ -21,14 +21,18 @@ class AlertService
     protected ConfigInterface $config;
 
     /**
-     * Check if already alerted
+     * Cek apakah sudah pernah mengirim alert untuk kombinasi app_name + correlation_id
+     * dengan status sent.
      */
-    public function isAlreadyAlerted(string $logIndex, string $logId, string $ruleType, int $ruleId): bool
+    public function hasAlertSentForCorrelation(string $appName, ?string $correlationId): bool
     {
-        return AlertLog::where('log_index', $logIndex)
-            ->where('log_id', $logId)
-            ->where('rule_type', $ruleType)
-            ->where('rule_id', $ruleId)
+        if ($correlationId === null || $correlationId === '') {
+            return false; // tanpa correlation id, tidak di-skip
+        }
+
+        return AlertLog::where('app_name', $appName)
+            ->where('correlation_id', $correlationId)
+            ->where('alert_status', 'sent')
             ->exists();
     }
 
@@ -63,43 +67,59 @@ class AlertService
             }
         }
 
-        // Kirim ke semua target dinamis
+        // Kumpulkan semua target pengiriman, deduplikasi per kanal
+        $telegramIds = [];
+        $emailIds = [];
+
+        // Dynamic telegram/email targets dari DB
         foreach ($dynamicTargets as $target) {
             if (str_starts_with((string) $target['type'], 'telegram')) {
-                if ($this->telegram->sendTo((string) $target['external_id'], $message)) {
-                    $sentTo[] = (string) $target['type'];
-                    $success = true;
-                }
+                $telegramIds[] = (string) $target['external_id'];
             } elseif ($target['type'] === 'email') {
-                if ($this->email->sendAlert($log['app_name'], $message, $log)) {
-                    $sentTo[] = 'email:' . (string) $target['external_id'];
-                    $success = true;
-                }
+                $emailIds[] = (string) $target['external_id'];
             }
         }
 
-        // 2) Legacy channels fallback (using env config)
+        // Legacy channels fallback (config) - bisa menyebabkan duplikat jika sama, maka dedup
         if (in_array('telegram_chat', $channels)) {
-            $chatId = $this->config->get('telegram.chat_id');
-            if ($chatId && $this->telegram->sendTo((string) $chatId, $message)) {
-                $sentTo[] = 'telegram_chat';
-                $success = true;
+            $chatId = (string) $this->config->get('telegram.chat_id');
+            if ($chatId !== '') {
+                $telegramIds[] = $chatId;
             }
         }
         if (in_array('telegram_group', $channels)) {
-            $groupId = $this->config->get('telegram.group_id');
-            if ($groupId && $this->telegram->sendTo((string) $groupId, $message)) {
-                $sentTo[] = 'telegram_group';
-                $success = true;
+            $groupId = (string) $this->config->get('telegram.group_id');
+            if ($groupId !== '') {
+                $telegramIds[] = $groupId;
             }
         }
         if (in_array('telegram', $channels)) { // backward compatible
+            // tipe ini tidak punya external_id, langsung gunakan sendAlert sekali saja
             if ($this->telegram->sendAlert($message)) {
                 $sentTo[] = 'telegram';
                 $success = true;
             }
         }
-        if (in_array('email', $channels)) {
+
+        // Dedup dan kirim telegram unik per external_id
+        $telegramIds = array_values(array_unique($telegramIds, SORT_STRING));
+        foreach ($telegramIds as $externalId) {
+            if ($this->telegram->sendTo($externalId, $message)) {
+                $sentTo[] = 'telegram:' . $externalId;
+                $success = true;
+            }
+        }
+
+        // Email targets
+        if (!empty($emailIds)) {
+            $emailIds = array_values(array_unique($emailIds, SORT_STRING));
+            foreach ($emailIds as $email) {
+                if ($this->email->sendAlert($log['app_name'], $message, $log)) {
+                    $sentTo[] = 'email:' . $email;
+                    $success = true;
+                }
+            }
+        } elseif (in_array('email', $channels)) {
             if ($this->email->sendAlert($log['app_name'], $message, $log)) {
                 $sentTo[] = 'email';
                 $success = true;
@@ -121,6 +141,21 @@ class AlertService
         $rule = $violation['rule'];
         $type = $violation['rule_type'];
 
+        // Siapkan context (JSON) yang sudah di-decode oleh ElasticsearchScanService
+        $contextPreview = '';
+        if (!empty($log['context']) && is_array($log['context'])) {
+            $ctx = $log['context'];
+            // ringkas jika terlalu panjang
+            $json = json_encode($ctx, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            // batasi agar aman untuk Telegram (<= 4096 char)
+            $maxLen = 1200; // sisakan ruang untuk field lain
+            if (strlen($json) > $maxLen) {
+                $json = substr($json, 0, $maxLen) . "... (truncated)";
+            }
+            $contextPreview = "\n📦 Context:\n```
+" . $json . "\n```";
+        }
+
         if ($type === 'app') {
             return sprintf(
                 "⚠️ *Slow App Alert*\n\n" .
@@ -129,7 +164,7 @@ class AlertService
                     "📊 Exceeded by: %dms\n" .
                     "📝 Message: `%s`\n" .
                     "🔗 Correlation ID: `%s`\n" .
-                    "🕐 Time: %s\n\n" .
+                    "🕐 Time: %s%s\n\n" .
                     "_Copy correlation ID untuk trace logs_",
                 $log['app_name'],
                 $log['duration_ms'],
@@ -137,7 +172,8 @@ class AlertService
                 $violation['exceeded_by_ms'],
                 $log['message'],
                 $log['correlation_id'] ?? 'N/A',
-                $log['timestamp']
+                $log['timestamp'],
+                $contextPreview
             );
         } else {
             return sprintf(
@@ -147,7 +183,7 @@ class AlertService
                     "⏱ Duration: %dms (threshold: %dms)\n" .
                     "📊 Exceeded by: %dms\n" .
                     "🔗 Correlation ID: `%s`\n" .
-                    "🕐 Time: %s\n\n" .
+                    "🕐 Time: %s%s\n\n" .
                     "_Copy correlation ID untuk trace logs_",
                 $log['message'],
                 $log['app_name'],
@@ -155,7 +191,8 @@ class AlertService
                 $violation['threshold_ms'],
                 $violation['exceeded_by_ms'],
                 $log['correlation_id'] ?? 'N/A',
-                $log['timestamp']
+                $log['timestamp'],
+                $contextPreview
             );
         }
     }
@@ -180,17 +217,20 @@ class AlertService
     {
         $log = $violation['log'];
 
-        // Hindari duplikasi berdasarkan constraint unique (log_index, log_id)
-        // Gunakan updateOrCreate supaya upsert idempotent saat full-scan
+        // Idempotensi berbasis (rule_type, rule_id, message_hash, correlation_id)
+        $messageHash = hash('sha256', (string) $log['message']);
         AlertLog::updateOrCreate(
             [
-                'log_index' => $log['index'],
-                'log_id' => $log['id'],
-            ],
-            [
+                // tetap gunakan key idempoten berbasis message+correlation untuk menjamin single write
                 'rule_type' => $violation['rule_type'],
                 'rule_id' => $violation['rule_id'],
-                'correlation_id' => $log['correlation_id'],
+                'message_hash' => $messageHash,
+                'correlation_id' => (string) ($log['correlation_id'] ?? ''),
+            ],
+            [
+                // referensi log ES tetap disimpan untuk audit
+                'log_index' => $log['index'],
+                'log_id' => $log['id'],
                 'app_name' => $log['app_name'],
                 'message' => $log['message'],
                 'duration_ms' => $log['duration_ms'],

@@ -9,6 +9,8 @@ use Hyperf\Contract\ConfigInterface;
 use Hyperf\Di\Annotation\Inject;
 use Hyperf\Context\ApplicationContext;
 use Hyperf\Logger\LoggerFactory;
+use App\Model\TelegramBot;
+use Psr\SimpleCache\CacheInterface;
 
 class TelegramService
 {
@@ -18,9 +20,12 @@ class TelegramService
     #[Inject]
     protected ConfigInterface $config;
 
+    #[Inject]
+    protected CacheInterface $cache;
+
     public function sendAlert(string $message): bool
     {
-        $botToken = $this->config->get('telegram.bot_token');
+        $botToken = $this->getActiveBotToken();
         $chatId = $this->config->get('telegram.chat_id');
 
         if (!$botToken || !$chatId) {
@@ -58,7 +63,7 @@ class TelegramService
      */
     public function sendTo(string $externalId, string $message): bool
     {
-        $botToken = $this->config->get('telegram.bot_token');
+        $botToken = $this->getActiveBotToken();
         if (!$botToken || !$externalId) {
             $logger = ApplicationContext::getContainer()
                 ->get(LoggerFactory::class)
@@ -87,5 +92,31 @@ class TelegramService
             $logger->error('Telegram send error: ' . $e->getMessage());
             return false;
         }
+    }
+
+    /**
+     * Ambil bot token aktif dari database dengan cache.
+     */
+    private function getActiveBotToken(): ?string
+    {
+        // cache key 5 menit
+        $cacheKey = 'telegram_bot_token_active';
+        $ttl = 300;
+
+        $token = $this->cache->get($cacheKey);
+        if (is_string($token) && $token !== '') {
+            return $token;
+        }
+
+        $bot = TelegramBot::where('is_active', true)
+            ->orderByDesc('id')
+            ->first(['bot_token']);
+
+        $token = $bot?->bot_token;
+        if ($token) {
+            $this->cache->set($cacheKey, $token, $ttl);
+        }
+
+        return $token;
     }
 }

@@ -37,7 +37,7 @@ class ElasticsearchScanService
         return $indices;
     }
 
-    public function scanLogs(string $indexName, ?ScanCheckpoint $checkpoint = null, int $batchSize = 500, ?array $searchAfter = null, ?string $fromTimestamp = null): array
+    public function scanLogs(string $indexName, ?ScanCheckpoint $checkpoint = null, int $batchSize = 500, ?array $searchAfter = null, ?string $fromTimestamp = null, ?string $toTimestamp = null): array
     {
         // Tentukan titik mulai
         if ($fromTimestamp === null) {
@@ -106,6 +106,23 @@ class ElasticsearchScanService
             if (strpos($fromTimestamp, 'T') === false) {
                 $iso = gmdate('Y-m-d\TH:i:s\Z', strtotime($fromTimestamp));
                 $params['body']['query']['bool']['must'][0]['range']['@timestamp']['gte'] = $iso;
+            }
+        }
+
+        // Tambahkan lte jika toTimestamp diberikan
+        if ($toTimestamp !== null) {
+            if (!isset($params['body']['query']['bool']['must'][0]['range'])) {
+                $params['body']['query']['bool']['must'][] = [
+                    'range' => [
+                        '@timestamp' => [
+                            'lte' => $toTimestamp
+                        ]
+                    ]
+                ];
+            } else {
+                $params['body']['query']['bool']['must'][0]['range']['@timestamp']['lte'] = (
+                    strpos($toTimestamp, 'T') === false
+                ) ? gmdate('Y-m-d\TH:i:s\Z', strtotime($toTimestamp)) : $toTimestamp;
             }
         }
 

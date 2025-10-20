@@ -20,6 +20,8 @@ Router::get('/favicon.ico', function () {
 
 Router::addGroup('/dashboard', function () {
     Router::get('/overview', [DashboardController::class, 'overview']);
+    Router::get('/log-trends', [DashboardController::class, 'logTrends']);
+    Router::get('/app-performance', [DashboardController::class, 'appPerformance']);
 });
 
 Router::addGroup('/monitor', function () {

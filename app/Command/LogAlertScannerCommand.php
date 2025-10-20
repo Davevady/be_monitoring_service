@@ -66,16 +66,15 @@ class LogAlertScannerCommand extends HyperfCommand
                     // Get checkpoint
                     $checkpoint = ScanCheckpoint::where('index_name', $indexName)->first();
 
-                    // Full scan with batching using search_after
+                    // Full scan untuk 24 jam terakhir dengan batching (search_after)
                     $alertsInIndex = 0;
                     $batch = 0;
                     $searchAfter = null;
-                    // Pastikan fromTimestamp bertipe string/null, bukan Carbon
-                    $fromTimestamp = null;
-                    if ($checkpoint && $checkpoint->last_scanned_timestamp) {
-                        $ts = $checkpoint->last_scanned_timestamp;
-                        $fromTimestamp = $ts instanceof \DateTimeInterface ? $ts->format('Y-m-d H:i:s') : (string) $ts;
-                    }
+                    // Range waktu 24 jam: dari (now - 24h) hingga now
+                    $to = Carbon::now('UTC');
+                    $from = (clone $to)->subHours(24);
+                    $fromTimestamp = $from->format('Y-m-d H:i:s');
+                    $toTimestamp = $to->format('Y-m-d H:i:s');
 
                     while (true) {
                         // Refresh rules setiap batch
@@ -86,7 +85,7 @@ class LogAlertScannerCommand extends HyperfCommand
                             $this->line("  ├─ Rules: {$appRulesCount} app, {$messageRulesCount} message (refreshed)");
                         }
                         $batch++;
-                        $logs = $this->esScan->scanLogs($indexName, $checkpoint, 500, $searchAfter, $fromTimestamp);
+                        $logs = $this->esScan->scanLogs($indexName, $checkpoint, 500, $searchAfter, $fromTimestamp, $toTimestamp);
                         $logsCount = count($logs);
                         if ($batch === 1) {
                             $this->info("  ├─ Batch #{$batch}: {$logsCount} logs");
@@ -109,11 +108,9 @@ class LogAlertScannerCommand extends HyperfCommand
                                 $totalAlertsTriggered++;
 
                                 // Check if already alerted
-                                if ($this->alert->isAlreadyAlerted(
-                                    $log['index'],
-                                    $log['id'],
-                                    $violation['rule_type'],
-                                    $violation['rule_id']
+                                if ($this->alert->hasAlertSentForCorrelation(
+                                    (string) ($log['app_name'] ?? ''),
+                                    (string) ($log['correlation_id'] ?? '')
                                 )) {
                                     continue;
                                 }
@@ -150,8 +147,7 @@ class LogAlertScannerCommand extends HyperfCommand
                             );
                             // Siapkan search_after untuk batch berikutnya
                             $searchAfter = [$lastLog['timestamp'], $lastLog['id']];
-                            // Gunakan timestamp yang sama dengan search_after; ES akan lanjut ke id berikutnya berkat sort
-                            $fromTimestamp = $lastLog['timestamp'];
+                            // Tetap gunakan window 24 jam; fromTimestamp tidak dipindah maju agar menyapu penuh rentang
                         }
                     }
 

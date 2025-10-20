@@ -235,6 +235,78 @@ GET /dashboard/overview
         "log_level_distribution": [...]
     }
 }
+
+# Get log trends for multi-line chart
+GET /dashboard/log-trends?range=24h
+GET /dashboard/log-trends?range=7d
+GET /dashboard/log-trends?range=30d
+
+# Response
+{
+    "status": "success",
+    "data": {
+        "labels": ["00:00", "01:00", "02:00", ...],
+        "datasets": [
+            {
+                "label": "INFO",
+                "data": [120, 150, 180, ...],
+                "borderColor": "#10b981",
+                "backgroundColor": "#10b98120",
+                "fill": false,
+                "tension": 0.1
+            },
+            {
+                "label": "WARNING",
+                "data": [25, 30, 35, ...],
+                "borderColor": "#f59e0b",
+                "backgroundColor": "#f59e0b20",
+                "fill": false,
+                "tension": 0.1
+            },
+            {
+                "label": "ERROR",
+                "data": [5, 8, 12, ...],
+                "borderColor": "#ef4444",
+                "backgroundColor": "#ef444420",
+                "fill": false,
+                "tension": 0.1
+            }
+        ],
+        "summary": {
+            "INFO": {
+                "total": 3600,
+                "average": 150.0,
+                "max": 200,
+                "min": 100,
+                "trend": "stable"
+            },
+            "WARNING": {
+                "total": 270,
+                "average": 11.25,
+                "max": 20,
+                "min": 5,
+                "trend": "up"
+            },
+            "ERROR": {
+                "total": 75,
+                "average": 3.125,
+                "max": 8,
+                "min": 1,
+                "trend": "down"
+            }
+        }
+    },
+    "meta": {
+        "range": "24h",
+        "interval": "1h",
+        "time_range": {
+            "from": "2024-01-15T00:00:00Z",
+            "to": "2024-01-16T00:00:00Z"
+        },
+        "execution_time_ms": 245.5,
+        "indices_scanned": 4
+    }
+}
 ```
 
 ### Monitor API
