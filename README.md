@@ -232,7 +232,20 @@ GET /dashboard/overview
             "overall_ms": 1250.5,
             "by_app": [...]
         },
-        "log_level_distribution": [...]
+        "log_level_distribution": [...],
+        "recent_violations": [
+            {
+                "app": "Payment Service",
+                "message": "process_transaction",
+                "time": "2 min ago",
+                "overage": 145,
+                "icon": "🔥",
+                "color": "#dc2626",
+                "type": "app",
+                "threshold": 2500,
+                "duration": 2645
+            }
+        ]
     }
 }
 
@@ -308,6 +321,13 @@ GET /dashboard/log-trends?range=30d
     }
 }
 ```
+
+**Features:**
+- **Full Scan**: Menggunakan Scroll API untuk memproses semua data
+- **Real-time Data**: Data langsung dari Elasticsearch tanpa cache
+- **Performance Metrics**: Statistik performa aplikasi dan pelanggaran
+- **Recent Violations**: 10 pelanggaran terbaru dalam 24 jam dengan icon dan warna berdasarkan severity
+- **Log Level Distribution**: Distribusi level log untuk donut chart
 
 ### Monitor API
 

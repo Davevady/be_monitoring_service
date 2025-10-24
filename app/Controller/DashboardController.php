@@ -48,6 +48,7 @@ class DashboardController
                 'violations' => $this->getViolationsOptimized($serviceIndices),
                 'avg_duration' => $this->getAvgDurationOptimized($serviceIndices),
                 'log_level_distribution' => $this->getLogLevelDistribution($serviceIndices),
+                'recent_violations' => $this->getRecentViolations($serviceIndices),
             ];
 
             $executionTime = round((microtime(true) - $startTime) * 1000, 2);
@@ -72,8 +73,138 @@ class DashboardController
     }
 
     /**
-     * Get total logs count - Optimized using count API
+     * Get log trends by time range and level for multi-line chart
      */
+    public function logTrends(RequestInterface $request, HttpResponse $response): PsrResponse
+    {
+        try {
+            $startTime = microtime(true);
+            
+            // Get range parameter (24h, 7d, 30d)
+            $range = $request->input('range', '24h');
+            $interval = $this->getIntervalForRange($range);
+            $timeRange = $this->getTimeRangeForPeriod($range);
+            
+            // Get all service indices
+            $allIndices = $this->es->cat()->indices(['format' => 'json']);
+            $serviceIndices = $this->filterServiceIndices($allIndices);
+
+            if (empty($serviceIndices)) {
+                return $response->json([
+                    'status' => 'error',
+                    'message' => 'No service indices found'
+                ]);
+            }
+
+            // Build Elasticsearch query for time-based aggregation
+            $params = [
+                'index' => implode(',', $serviceIndices),
+                'body' => [
+                    'size' => 0,
+                    'query' => [
+                        'bool' => [
+                            'must' => [
+                                ['exists' => ['field' => 'app_name']],
+                                [
+                                    'range' => [
+                                        '@timestamp' => [
+                                            'gte' => $timeRange['from'],
+                                            'lte' => $timeRange['to']
+                                        ]
+                                    ]
+                                ]
+                            ],
+                            'must_not' => [
+                                ['term' => ['app_name' => '']],
+                                ['term' => ['app_name.keyword' => 'null']]
+                            ]
+                        ]
+                    ],
+                    'aggs' => [
+                        'by_time' => [
+                            'date_histogram' => [
+                                'field' => '@timestamp',
+                                'calendar_interval' => $interval,
+                                'min_doc_count' => 0,
+                                'extended_bounds' => [
+                                    'min' => $timeRange['from'],
+                                    'max' => $timeRange['to']
+                                ]
+                            ],
+                            'aggs' => [
+                                'by_level' => [
+                                    'terms' => [
+                                        'field' => 'level_name.keyword',
+                                        'size' => 10
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ];
+
+            $result = $this->es->search($params);
+            $buckets = $result['aggregations']['by_time']['buckets'] ?? [];
+
+            // Process data for multi-line chart
+            $chartData = $this->processTrendDataForChart($buckets, $range);
+            
+            $executionTime = round((microtime(true) - $startTime) * 1000, 2);
+
+            return $response->json([
+                'status' => 'success',
+                'data' => $chartData,
+                'meta' => [
+                    'range' => $range,
+                    'interval' => $interval,
+                    'time_range' => $timeRange,
+                    'execution_time_ms' => $executionTime,
+                    'indices_scanned' => count($serviceIndices)
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            return $response->json([
+                'status' => 'error',
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ], 500);
+        }
+    }
+
+    /**
+     * Endpoint: App performance summary with configurable range (24h, 7d, 30d)
+     */
+    public function appPerformance(RequestInterface $request, HttpResponse $response): PsrResponse
+    {
+        try {
+            $range = $request->input('range', '24h');
+
+            // Get indices as in overview
+            $allIndices = $this->es->cat()->indices(['format' => 'json']);
+            $serviceIndices = $this->filterServiceIndices($allIndices);
+            if (empty($serviceIndices)) {
+                return $response->json([
+                    'status' => 'error',
+                    'message' => 'No service indices found'
+                ]);
+            }
+
+            $data = $this->getAppPerformanceSummaryByRange($serviceIndices, $range);
+            return $response->json([
+                'status' => 'success',
+                'data' => $data,
+                'meta' => [ 'range' => $range ]
+            ]);
+        } catch (\Exception $e) {
+            return $response->json([
+                'status' => 'error',
+                'message' => $e->getMessage()
+            ], 500);
+        }
+    }
+
     private function getTotalLogsOptimized(array $indices): int
     {
         try {
@@ -102,9 +233,6 @@ class DashboardController
         }
     }
 
-    /**
-     * Get active apps from database (app_rules table)
-     */
     private function getActiveAppsFromDatabase(): array
     {
         try {
@@ -128,9 +256,6 @@ class DashboardController
         }
     }
 
-    /**
-     * Get violations - Optimized with batching using scroll API
-     */
     private function getViolationsOptimized(array $indices): array
     {
         try {
@@ -276,9 +401,6 @@ class DashboardController
         }
     }
 
-    /**
-     * Get average duration - Optimized with aggregation
-     */
     private function getAvgDurationOptimized(array $indices): array
     {
         try {
@@ -359,9 +481,6 @@ class DashboardController
         }
     }
 
-    /**
-     * Get log level distribution for donut chart
-     */
     private function getLogLevelDistribution(array $indices): array
     {
         try {
@@ -442,110 +561,6 @@ class DashboardController
         }
     }
 
-    /**
-     * Get log trends by time range and level for multi-line chart
-     */
-    public function logTrends(RequestInterface $request, HttpResponse $response): PsrResponse
-    {
-        try {
-            $startTime = microtime(true);
-            
-            // Get range parameter (24h, 7d, 30d)
-            $range = $request->input('range', '24h');
-            $interval = $this->getIntervalForRange($range);
-            $timeRange = $this->getTimeRangeForPeriod($range);
-            
-            // Get all service indices
-            $allIndices = $this->es->cat()->indices(['format' => 'json']);
-            $serviceIndices = $this->filterServiceIndices($allIndices);
-
-            if (empty($serviceIndices)) {
-                return $response->json([
-                    'status' => 'error',
-                    'message' => 'No service indices found'
-                ]);
-            }
-
-            // Build Elasticsearch query for time-based aggregation
-            $params = [
-                'index' => implode(',', $serviceIndices),
-                'body' => [
-                    'size' => 0,
-                    'query' => [
-                        'bool' => [
-                            'must' => [
-                                ['exists' => ['field' => 'app_name']],
-                                [
-                                    'range' => [
-                                        '@timestamp' => [
-                                            'gte' => $timeRange['from'],
-                                            'lte' => $timeRange['to']
-                                        ]
-                                    ]
-                                ]
-                            ],
-                            'must_not' => [
-                                ['term' => ['app_name' => '']],
-                                ['term' => ['app_name.keyword' => 'null']]
-                            ]
-                        ]
-                    ],
-                    'aggs' => [
-                        'by_time' => [
-                            'date_histogram' => [
-                                'field' => '@timestamp',
-                                'calendar_interval' => $interval,
-                                'min_doc_count' => 0,
-                                'extended_bounds' => [
-                                    'min' => $timeRange['from'],
-                                    'max' => $timeRange['to']
-                                ]
-                            ],
-                            'aggs' => [
-                                'by_level' => [
-                                    'terms' => [
-                                        'field' => 'level_name.keyword',
-                                        'size' => 10
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ];
-
-            $result = $this->es->search($params);
-            $buckets = $result['aggregations']['by_time']['buckets'] ?? [];
-
-            // Process data for multi-line chart
-            $chartData = $this->processTrendDataForChart($buckets, $range);
-            
-            $executionTime = round((microtime(true) - $startTime) * 1000, 2);
-
-            return $response->json([
-                'status' => 'success',
-                'data' => $chartData,
-                'meta' => [
-                    'range' => $range,
-                    'interval' => $interval,
-                    'time_range' => $timeRange,
-                    'execution_time_ms' => $executionTime,
-                    'indices_scanned' => count($serviceIndices)
-                ]
-            ]);
-
-        } catch (\Exception $e) {
-            return $response->json([
-                'status' => 'error',
-                'message' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ], 500);
-        }
-    }
-
-    /**
-     * Process trend data for multi-line chart format
-     */
     private function processTrendDataForChart(array $buckets, string $range): array
     {
         // Define log levels we want to track
@@ -605,9 +620,6 @@ class DashboardController
         ];
     }
 
-    /**
-     * Calculate trend summary statistics
-     */
     private function calculateTrendSummary(array $datasets, array $logLevels): array
     {
         $summary = [];
@@ -638,9 +650,6 @@ class DashboardController
         return $summary;
     }
 
-    /**
-     * Calculate trend direction (up, down, stable)
-     */
     private function calculateTrendDirection(array $data): string
     {
         if (count($data) < 2) {
@@ -674,9 +683,6 @@ class DashboardController
         }
     }
 
-    /**
-     * Get interval for Elasticsearch date histogram
-     */
     private function getIntervalForRange(string $range): string
     {
         return match ($range) {
@@ -687,9 +693,6 @@ class DashboardController
         };
     }
 
-    /**
-     * Get time range for the specified period
-     */
     private function getTimeRangeForPeriod(string $range): array
     {
         $now = new \DateTime();
@@ -715,9 +718,6 @@ class DashboardController
         ];
     }
 
-    /**
-     * Get time format for labels based on range
-     */
     private function getTimeFormatForRange(string $range): string
     {
         return match ($range) {
@@ -728,18 +728,12 @@ class DashboardController
         };
     }
 
-    /**
-     * Format timestamp for chart labels
-     */
     private function formatTimestampForLabel(string $timestamp, string $format): string
     {
         $date = new \DateTime($timestamp);
         return $date->format($format);
     }
 
-    /**
-     * Filter service indices
-     */
     private function filterServiceIndices(array $allIndices): array
     {
         $keywords = ['core', 'merchant', 'transaction', 'vendor'];
@@ -756,11 +750,6 @@ class DashboardController
 
         return $indices;
     }
-
-    /**
-     * Summarize app performance for apps registered in app_rules.
-     * Return sorted list from best (fastest) to worst (slowest) with trend vs previous 24h.
-     */
     private function getAppPerformanceSummary(array $indices): array
     {
         try {
@@ -906,38 +895,6 @@ class DashboardController
         }
     }
 
-    /**
-     * Endpoint: App performance summary with configurable range (24h, 7d, 30d)
-     */
-    public function appPerformance(RequestInterface $request, HttpResponse $response): PsrResponse
-    {
-        try {
-            $range = $request->input('range', '24h');
-
-            // Get indices as in overview
-            $allIndices = $this->es->cat()->indices(['format' => 'json']);
-            $serviceIndices = $this->filterServiceIndices($allIndices);
-            if (empty($serviceIndices)) {
-                return $response->json([
-                    'status' => 'error',
-                    'message' => 'No service indices found'
-                ]);
-            }
-
-            $data = $this->getAppPerformanceSummaryByRange($serviceIndices, $range);
-            return $response->json([
-                'status' => 'success',
-                'data' => $data,
-                'meta' => [ 'range' => $range ]
-            ]);
-        } catch (\Exception $e) {
-            return $response->json([
-                'status' => 'error',
-                'message' => $e->getMessage()
-            ], 500);
-        }
-    }
-
     private function getAppPerformanceSummaryByRange(array $indices, string $range): array
     {
         try {
@@ -1047,6 +1004,180 @@ class DashboardController
             return ['total' => count($items), 'items' => $items];
         } catch (\Exception $e) {
             return ['total' => 0, 'items' => [], 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Get recent violations from Elasticsearch (last 24 hours)
+     */
+    private function getRecentViolations(array $indices): array
+    {
+        try {
+            // Load rules from database
+            $appRules = AppRule::where('is_active', true)->get()->keyBy('app_name');
+            $messageRules = MessageRule::where('is_active', true)->get();
+            
+            // Index message rules untuk lookup lebih cepat
+            $messageLimits = [];
+            foreach ($messageRules as $rule) {
+                $messageLimits[$rule->app_name][$rule->message_key] = (int) $rule->max_duration;
+            }
+
+            // Window waktu: 24 jam terakhir
+            $now = new \DateTime('now', new \DateTimeZone('UTC'));
+            $from = (clone $now)->modify('-24 hours');
+            $formatIso = fn($d) => $d->format('Y-m-d\TH:i:s\Z');
+
+            $params = [
+                'index' => implode(',', $indices),
+                'body' => [
+                    'size' => 100, // Ambil 100 log terbaru untuk diproses
+                    'query' => [
+                        'bool' => [
+                            'must' => [
+                                ['exists' => ['field' => 'app_name']],
+                                ['exists' => ['field' => 'extra.duration_ms']],
+                                [
+                                    'range' => [
+                                        '@timestamp' => [
+                                            'gte' => $formatIso($from),
+                                            'lte' => $formatIso($now)
+                                        ]
+                                    ]
+                                ]
+                            ],
+                            'must_not' => [
+                                ['term' => ['app_name' => '']],
+                                ['term' => ['app_name.keyword' => 'null']]
+                            ]
+                        ]
+                    ],
+                    'sort' => [
+                        '@timestamp' => ['order' => 'desc']
+                    ],
+                    '_source' => ['@timestamp', 'app_name', 'extra.duration_ms', 'message', 'context.message_key', 'message_key']
+                ]
+            ];
+
+            $result = $this->es->search($params);
+            $hits = $result['hits']['hits'] ?? [];
+
+            $violations = [];
+            foreach ($hits as $hit) {
+                $src = $hit['_source'];
+                $app = $src['app_name'] ?? null;
+                
+                if (!$app) continue;
+
+                $extra = is_string($src['extra'] ?? null) 
+                    ? json_decode($src['extra'], true) 
+                    : ($src['extra'] ?? []);
+                
+                $duration = $extra['duration_ms'] ?? null;
+                
+                if ($duration === null) continue;
+
+                $violation = null;
+
+                // Check app rule violation
+                if (isset($appRules[$app])) {
+                    $maxDuration = (int) $appRules[$app]->max_duration;
+                    if ($duration > $maxDuration) {
+                        $violation = [
+                            'app' => $app,
+                            'message' => $src['message'] ?? 'Unknown',
+                            'time' => $src['@timestamp'],
+                            'overage' => $duration - $maxDuration,
+                            'type' => 'app',
+                            'threshold' => $maxDuration,
+                            'duration' => $duration
+                        ];
+                    }
+                }
+
+                // Check message rule violation (prioritize message rule over app rule)
+                $msgKey = $src['message_key'] 
+                    ?? ($src['context']['message_key'] ?? null)
+                    ?? ($src['message'] ?? null);
+
+                if ($msgKey && isset($messageLimits[$app][$msgKey])) {
+                    if ($duration > $messageLimits[$app][$msgKey]) {
+                        $violation = [
+                            'app' => $app,
+                            'message' => $msgKey,
+                            'time' => $src['@timestamp'],
+                            'overage' => $duration - $messageLimits[$app][$msgKey],
+                            'type' => 'message',
+                            'threshold' => $messageLimits[$app][$msgKey],
+                            'duration' => $duration
+                        ];
+                    }
+                }
+
+                if ($violation) {
+                    $violations[] = $violation;
+                }
+            }
+
+            // Sort by time descending and limit to 10 most recent
+            usort($violations, fn($a, $b) => strtotime($b['time']) <=> strtotime($a['time']));
+            $violations = array_slice($violations, 0, 10);
+
+            // Format untuk frontend
+            $formattedViolations = [];
+            foreach ($violations as $violation) {
+                $overage = $violation['overage'];
+                
+                // Determine icon and color based on overage severity
+                if ($overage > 100) {
+                    $icon = '🔥';
+                    $color = '#dc2626'; // Red
+                } elseif ($overage > 50) {
+                    $icon = '⚠️';
+                    $color = '#ea580c'; // Orange-red
+                } else {
+                    $icon = '⚡';
+                    $color = '#f59e0b'; // Orange
+                }
+
+                // Calculate time ago
+                $timeAgo = $this->getTimeAgo($violation['time']);
+
+                $formattedViolations[] = [
+                    'app' => $violation['app'],
+                    'message' => $violation['message'],
+                    'time' => $timeAgo,
+                    'overage' => $overage,
+                    'icon' => $icon,
+                    'color' => $color,
+                    'type' => $violation['type'],
+                    'threshold' => $violation['threshold'],
+                    'duration' => $violation['duration']
+                ];
+            }
+
+            return $formattedViolations;
+
+        } catch (\Exception $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Calculate time ago string
+     */
+    private function getTimeAgo(string $timestamp): string
+    {
+        $now = new \DateTime();
+        $time = new \DateTime($timestamp);
+        $diff = $now->diff($time);
+
+        if ($diff->h > 0) {
+            return $diff->h . ' hour' . ($diff->h > 1 ? 's' : '') . ' ago';
+        } elseif ($diff->i > 0) {
+            return $diff->i . ' min ago';
+        } else {
+            return 'Just now';
         }
     }
 }
